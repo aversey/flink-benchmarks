@@ -21,12 +21,16 @@ package org.apache.flink.benchmark;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.configuration.StateBackendOptions;
+import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.runtime.minicluster.MiniClusterConfiguration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.graph.StreamGraph;
+import org.apache.flink.streaming.api.graph.StreamNode;
 import org.apache.flink.test.util.MiniClusterPipelineExecutorServiceLoader;
 
 import org.openjdk.jmh.annotations.Setup;
@@ -53,8 +57,31 @@ public class FlinkEnvironmentContext {
             throw new RuntimeException("setUp was called multiple times!");
         }
         final Configuration clusterConfig = createConfiguration();
+        clusterConfig.set(PipelineOptions.OPERATOR_CHAINING, false);
         clusterConfig.set(RestartStrategyOptions.RESTART_STRATEGY, "none");
         clusterConfig.set(StateBackendOptions.STATE_BACKEND, "hashmap");
+        final String remote = System.getProperty("flink.benchmark.remote");
+        if (remote != null) {
+            final String[] hostPort = remote.split(":", 2);
+            clusterConfig.set(DeploymentOptions.TARGET, "remote");
+            clusterConfig.set(RestOptions.ADDRESS, hostPort[0]);
+            clusterConfig.set(RestOptions.PORT, Integer.parseInt(hostPort[1]));
+            env =
+                    new StreamExecutionEnvironment(clusterConfig) {
+                        @Override
+                        public JobClient executeAsync(StreamGraph streamGraph) throws Exception {
+                            for (StreamNode node : streamGraph.getStreamNodes()) {
+                                node.setSlotSharingGroup("operator-" + node.getId());
+                            }
+                            return super.executeAsync(streamGraph);
+                        }
+                    };
+            env.setParallelism(parallelism);
+            if (objectReuse) {
+                env.getConfig().enableObjectReuse();
+            }
+            return;
+        }
         miniCluster =
                 new MiniCluster(
                         new MiniClusterConfiguration.Builder()
@@ -83,6 +110,9 @@ public class FlinkEnvironmentContext {
 
     @TearDown
     public void tearDown() throws Exception {
+        if (miniCluster == null) {
+            return;
+        }
         miniCluster.close();
         miniCluster = null;
     }
